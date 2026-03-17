@@ -23,7 +23,7 @@ from google.oauth2 import service_account
 st.set_page_config(page_title="USO1-Report Manager", layout="wide")
 
 # ✅ ใส่ ID โฟลเดอร์ใน Shared Drive ของคุณ (จากลิงก์ที่ส่งมา)
-GOOGLE_DRIVE_FOLDER_ID = '1yO8M-5QIVRhVoDoLu2yaYAJo4csy1GdI'
+GOOGLE_DRIVE_FOLDER_ID = '1-4OwgP-ODbelbtwSg5-m-rm4cyOTcW7O'
 
 def get_drive_service():
     """เชื่อมต่อ Google Drive API"""
