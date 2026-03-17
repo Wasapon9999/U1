@@ -222,7 +222,7 @@ def generate_pdf_original_style(df, center_name):
     return buffer.getvalue()
 
 # --- 5. Main UI ---
-
+st.title("🚀 ระบบจัดการรายงาน USO1 (สำหรับตรวจแก้ไข)")
 if 'main_df' not in st.session_state:
     st.session_state.main_df = pd.read_csv("03-2026.csv")
 
