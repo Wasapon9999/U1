@@ -22,7 +22,6 @@ from google.oauth2 import service_account
 # --- 1. การตั้งค่าหน้าเว็บและ Config ---
 st.set_page_config(page_title="USO1-Report Manager", layout="wide")
 
-# ✅ ID โฟลเดอร์ใน Shared Drive
 GOOGLE_DRIVE_FOLDER_ID = '1-4OwgP-ODbelbtwSg5-m-rm4cyOTcW7O'
 
 def get_drive_service():
@@ -84,14 +83,11 @@ def download_image_from_drive(file_name):
     all_items = get_all_files_in_drive(GOOGLE_DRIVE_FOLDER_ID)
     search_target = normalize_filename(file_name)
     if not all_items or not search_target: return None
-    
-    # กรณีชื่อซ้ำใน Drive ให้เอา ID ล่าสุดเสมอ (ตัวที่อยู่บนสุด)
     target_id = None
     for item in all_items:
         if normalize_filename(item['name']) == search_target:
             target_id = item['id']
             break
-
     if target_id:
         try:
             service = get_drive_service()
@@ -107,36 +103,23 @@ def download_image_from_drive(file_name):
     return None
 
 def upload_and_overwrite(target_filename, content_bytes):
-    """ฟังก์ชันใหม่: กวาดล้างไฟล์ชื่อซ้ำทั้งหมดก่อนอัปโหลด เพื่อป้องกัน Duplicate ใน Shared Drive"""
     service = get_drive_service()
     if not service: return
     try:
-        # 1. ค้นหาไฟล์ทั้งหมดที่มีชื่อตรงกับที่ต้องการ (รวมตัวที่ซ้ำกันด้วย)
         query = f"'{GOOGLE_DRIVE_FOLDER_ID}' in parents and name = '{target_filename}' and trashed = false"
-        results = service.files().list(
-            q=query, 
-            fields="files(id)",
-            supportsAllDrives=True, 
-            includeItemsFromAllDrives=True
-        ).execute()
-        
-        # 2. ลบ "ทุกไฟล์" ที่ชื่อนี้ทิ้งให้เกลี้ยง
+        results = service.files().list(q=query, fields="files(id)", supportsAllDrives=True, includeItemsFromAllDrives=True).execute()
         files_to_delete = results.get('files', [])
         for f in files_to_delete:
-            try:
-                service.files().delete(fileId=f['id'], supportsAllDrives=True).execute()
+            try: service.files().delete(fileId=f['id'], supportsAllDrives=True).execute()
             except: pass
-
-        # 3. อัปโหลดไฟล์ใหม่เข้าไปเป็นตัวเดียวในโฟลเดอร์
         file_metadata = {'name': target_filename, 'parents': [GOOGLE_DRIVE_FOLDER_ID]}
         media = MediaIoBaseUpload(BytesIO(content_bytes), mimetype='image/jpeg', resumable=True)
         service.files().create(body=file_metadata, media_body=media, supportsAllDrives=True).execute()
-        
         st.cache_data.clear() 
     except Exception as e:
         st.error(f"❌ อัปโหลดล้มเหลว: {str(e)}")
 
-# --- 3. Utility & PDF Functions (คงเดิมตามรูปแบบที่คุณต้องการ) ---
+# --- 3. Utility & Date Format ---
 
 def apply_exif_orientation(img):
     try:
@@ -242,11 +225,12 @@ def generate_pdf_original_style(df, center_name):
 # --- 4. Main UI ---
 
 if 'main_df' not in st.session_state:
-    try:
-        st.session_state.main_df = pd.read_csv("03-2026.csv").fillna("")
-    except:
-        st.error("❌ ไม่พบไฟล์ CSV")
-        st.stop()
+    try: st.session_state.main_df = pd.read_csv("03-2026.csv").fillna("")
+    except: st.error("❌ ไม่พบไฟล์ CSV"); st.stop()
+
+# ✅ ใช้เวอร์ชันเพื่อล้างค่า File Uploader
+if 'uploader_version' not in st.session_state:
+    st.session_state.uploader_version = 0
 
 st.sidebar.title("เมนู")
 centers = st.session_state.main_df['file_name'].unique()
@@ -277,7 +261,8 @@ for idx in df_idx:
             else:
                 c_img[i].warning(f"❌ ไม่พบรูป: {target_filename}")
             
-            upload_key = f"u_{col}_{idx}"
+            # ✅ แก้ปัญหา Loop: ใส่ 'v' ต่อท้ายคีย์ เพื่อให้คีย์เปลี่ยนเมื่ออัปโหลดเสร็จ
+            upload_key = f"u_{col}_{idx}_v{st.session_state.uploader_version}"
             new_f = c_img[i].file_uploader(f"เปลี่ยนรูป {col}", type=['jpg','png','jpeg'], key=upload_key)
             
             if new_f is not None:
@@ -285,11 +270,13 @@ for idx in df_idx:
                     st.error("⚠️ ชื่อไฟล์ใน CSV ว่างเปล่า")
                 else:
                     with st.spinner(f"กำลังอัปโหลด..."):
-                        # ✅ เรียกฟังก์ชันลบชื่อซ้ำให้เกลี้ยงก่อนอัปโหลด
+                        # ทำการอัปโหลด
                         upload_and_overwrite(target_filename, new_f.getbuffer())
+                        # ✅ เพิ่มเวอร์ชันเพื่อทำลาย File Uploader ตัวเก่าทิ้ง ป้องกันการอัปโหลดซ้ำ
+                        st.session_state.uploader_version += 1
                         st.toast(f"อัปโหลดสำเร็จ!")
                         time.sleep(1)
-                        st.rerun()
+                        st.rerun() # รีหน้าเพื่อล้างทุกอย่าง
 
 st.divider()
 if st.button("🖨️ ออกรายงาน PDF", use_container_width=True, type="primary"):
