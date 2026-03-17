@@ -22,7 +22,7 @@ from google.oauth2 import service_account
 # --- 1. การตั้งค่าหน้าเว็บและ Config ---
 st.set_page_config(page_title="USO1-Report Manager", layout="wide")
 
-# ✅ ใส่ ID โฟลเดอร์ใน Shared Drive
+# ✅ ID โฟลเดอร์ใน Shared Drive
 GOOGLE_DRIVE_FOLDER_ID = '1-4OwgP-ODbelbtwSg5-m-rm4cyOTcW7O'
 
 def get_drive_service():
@@ -85,6 +85,7 @@ def download_image_from_drive(file_name):
     search_target = normalize_filename(file_name)
     if not all_items or not search_target: return None
     
+    # กรณีชื่อซ้ำใน Drive ให้เอา ID ล่าสุดเสมอ (ตัวที่อยู่บนสุด)
     target_id = None
     for item in all_items:
         if normalize_filename(item['name']) == search_target:
@@ -106,24 +107,36 @@ def download_image_from_drive(file_name):
     return None
 
 def upload_and_overwrite(target_filename, content_bytes):
+    """ฟังก์ชันใหม่: กวาดล้างไฟล์ชื่อซ้ำทั้งหมดก่อนอัปโหลด เพื่อป้องกัน Duplicate ใน Shared Drive"""
     service = get_drive_service()
     if not service: return
     try:
+        # 1. ค้นหาไฟล์ทั้งหมดที่มีชื่อตรงกับที่ต้องการ (รวมตัวที่ซ้ำกันด้วย)
         query = f"'{GOOGLE_DRIVE_FOLDER_ID}' in parents and name = '{target_filename}' and trashed = false"
-        results = service.files().list(q=query, supportsAllDrives=True, includeItemsFromAllDrives=True).execute()
+        results = service.files().list(
+            q=query, 
+            fields="files(id)",
+            supportsAllDrives=True, 
+            includeItemsFromAllDrives=True
+        ).execute()
         
-        for f in results.get('files', []):
-            try: service.files().delete(fileId=f['id'], supportsAllDrives=True).execute()
+        # 2. ลบ "ทุกไฟล์" ที่ชื่อนี้ทิ้งให้เกลี้ยง
+        files_to_delete = results.get('files', [])
+        for f in files_to_delete:
+            try:
+                service.files().delete(fileId=f['id'], supportsAllDrives=True).execute()
             except: pass
 
+        # 3. อัปโหลดไฟล์ใหม่เข้าไปเป็นตัวเดียวในโฟลเดอร์
         file_metadata = {'name': target_filename, 'parents': [GOOGLE_DRIVE_FOLDER_ID]}
         media = MediaIoBaseUpload(BytesIO(content_bytes), mimetype='image/jpeg', resumable=True)
         service.files().create(body=file_metadata, media_body=media, supportsAllDrives=True).execute()
+        
         st.cache_data.clear() 
     except Exception as e:
         st.error(f"❌ อัปโหลดล้มเหลว: {str(e)}")
 
-# --- 3. Utility & Date Format ---
+# --- 3. Utility & PDF Functions (คงเดิมตามรูปแบบที่คุณต้องการ) ---
 
 def apply_exif_orientation(img):
     try:
@@ -166,12 +179,9 @@ def parse_thai_date_simple(s):
     except: pass
     return pd.NaT, str(s)
 
-# --- 4. PDF Generator (รูปแบบเดิม) ---
-
 def generate_pdf_original_style(df, center_name):
     buffer = BytesIO()
     doc = SimpleDocTemplate(buffer, pagesize=A4, rightMargin=20, leftMargin=20, topMargin=25, bottomMargin=15)
-
     thai_styles = {
         "Normal": ParagraphStyle("ThaiNormal", fontName=F_REG, fontSize=14, leading=18, alignment=1),
         "Title": ParagraphStyle("ThaiTitle", fontName=F_BOLD, fontSize=18, leading=24, alignment=1),
@@ -180,49 +190,28 @@ def generate_pdf_original_style(df, center_name):
         "HeaderStyle": ParagraphStyle("H", fontName=F_BOLD, fontSize=10, leading=11, alignment=1),
         "CellStyle": ParagraphStyle("C", fontName=F_REG, fontSize=10, leading=11, alignment=1),
     }
-
     story = []
     story.append(Paragraph("รายงานเวลาปฏิบัติงาน USO1-Renew", thai_styles["Title"]))
     story.append(Paragraph(f"ศูนย์ : {center_name}", thai_styles["Title"]))
-
     dt_first, date_str = parse_thai_date_simple(df.iloc[0]['date'])
     if pd.notna(dt_first):
         story.append(Paragraph(f"เดือน : {date_str.split(' ', 1)[1]}", thai_styles["Heading2"]))
-
     valid_names = df["name"].loc[df["name"].str.strip() != ""]
     emp_name = valid_names.iloc[0] if not valid_names.empty else ""
     story.append(Paragraph(f"เจ้าหน้าที่ดูแลประจำศูนย์ : {emp_name}", thai_styles["Heading2"]))
     story.append(Spacer(1, 2))
-
     table_data = [[Paragraph(h, thai_styles["HeaderStyle"]) for h in ["ลำดับ", "วันที่", "ชื่อ - นามสกุล", "เวลาเข้า", "เวลาออก", "ตำแหน่ง", "หมายเหตุ"]]]
-
     for i, row in df.iterrows():
         _, d_thai = parse_thai_date_simple(row['date'])
-        table_data.append([
-            Paragraph(str(i+1), thai_styles["CellStyle"]),
-            Paragraph(d_thai, thai_styles["CellStyle"]),
-            Paragraph(row['name'], thai_styles["CellStyle"]),
-            Paragraph(fmt_time(row['time_in']), thai_styles["CellStyle"]),
-            Paragraph(fmt_time(row['time_out']), thai_styles["CellStyle"]),
-            Paragraph(row['status'], thai_styles["CellStyle"]),
-            Paragraph("", thai_styles["CellStyle"])
-        ])
-
+        table_data.append([Paragraph(str(i+1), thai_styles["CellStyle"]), Paragraph(d_thai, thai_styles["CellStyle"]), Paragraph(row['name'], thai_styles["CellStyle"]), Paragraph(fmt_time(row['time_in']), thai_styles["CellStyle"]), Paragraph(fmt_time(row['time_out']), thai_styles["CellStyle"]), Paragraph(row['status'], thai_styles["CellStyle"]), Paragraph("", thai_styles["CellStyle"])])
     tbl = Table(table_data, colWidths=[35, 100, 130, 60, 60, 80, 70], repeatRows=1)
-    tbl.setStyle(TableStyle([
-        ("GRID", (0, 0), (-1, -1), 0.5, colors.black),
-        ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey),
-        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"), ("ALIGN", (0, 0), (-1, -1), "CENTER"),
-        ("TOPPADDING", (0, 0), (-1, -1), 3.5), ("BOTTOMPADDING", (0, 0), (-1, -1), 3.5),
-    ]))
+    tbl.setStyle(TableStyle([("GRID", (0, 0), (-1, -1), 0.5, colors.black), ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey), ("VALIGN", (0, 0), (-1, -1), "MIDDLE"), ("ALIGN", (0, 0), (-1, -1), "CENTER"), ("TOPPADDING", (0, 0), (-1, -1), 3.5), ("BOTTOMPADDING", (0, 0), (-1, -1), 3.5)]))
     story.append(tbl)
     story.append(Spacer(1, 30))
-
     sig_style = thai_styles["Signature"]
     sig_left = [Paragraph("....................................", sig_style), Spacer(1, 6), Paragraph(f"( {emp_name} )", sig_style), Paragraph("ผดล.ประจำศูนย์", sig_style)]
     sig_right = [Paragraph("....................................", sig_style), Spacer(1, 6), Paragraph("( ...................................... )", sig_style), Paragraph("ตำแหน่ง_______________________", sig_style)]
     story.append(KeepTogether(Table([[sig_left, sig_right]], colWidths=[260, 260])))
-
     for _, r in df.iterrows():
         story.append(PageBreak())
         _, d_thai = parse_thai_date_simple(r['date'])
@@ -230,7 +219,6 @@ def generate_pdf_original_style(df, center_name):
         story.append(Spacer(1, 12))
         story.append(Paragraph(f"ชื่อ : <b>{r['name']}</b> &nbsp; ตำแหน่ง : <b>{r['status']}</b>", thai_styles["Normal"]))
         story.append(Spacer(1, 6))
-
         for label, col_img, col_time in [("เข้า (เช้า)", "img_in1", "time_in"), ("ออก (เย็น)", "img_out1", "time_out")]:
             img_stream = download_image_from_drive(r[col_img])
             if img_stream:
@@ -248,11 +236,10 @@ def generate_pdf_original_style(df, center_name):
                 except: pass
             story.append(Paragraph(f"เวลา{label} : <b>{fmt_time(r[col_time])}</b>", thai_styles["Normal"]))
             story.append(Spacer(1, 18))
-
     doc.build(story)
     return buffer.getvalue()
 
-# --- 5. Main UI ---
+# --- 4. Main UI ---
 
 if 'main_df' not in st.session_state:
     try:
@@ -260,10 +247,6 @@ if 'main_df' not in st.session_state:
     except:
         st.error("❌ ไม่พบไฟล์ CSV")
         st.stop()
-
-# สร้างสถานะเพื่อเช็คการอัปโหลดสำเร็จ
-if 'upload_done' not in st.session_state:
-    st.session_state.upload_done = False
 
 st.sidebar.title("เมนู")
 centers = st.session_state.main_df['file_name'].unique()
@@ -294,20 +277,18 @@ for idx in df_idx:
             else:
                 c_img[i].warning(f"❌ ไม่พบรูป: {target_filename}")
             
-            # --- ปรับส่วนนี้เพื่อหยุด Loop ---
             upload_key = f"u_{col}_{idx}"
             new_f = c_img[i].file_uploader(f"เปลี่ยนรูป {col}", type=['jpg','png','jpeg'], key=upload_key)
             
             if new_f is not None:
-                # ตรวจสอบว่ารูปนี้เพิ่งถูกอัปโหลดไปในรอบปัจจุบันหรือไม่
                 if target_filename in ["", "0", "nan"]:
                     st.error("⚠️ ชื่อไฟล์ใน CSV ว่างเปล่า")
                 else:
                     with st.spinner(f"กำลังอัปโหลด..."):
+                        # ✅ เรียกฟังก์ชันลบชื่อซ้ำให้เกลี้ยงก่อนอัปโหลด
                         upload_and_overwrite(target_filename, new_f.getbuffer())
                         st.toast(f"อัปโหลดสำเร็จ!")
                         time.sleep(1)
-                        # ใช้กลไก Rerun และล้างแคชของ File Uploader ทันที
                         st.rerun()
 
 st.divider()
