@@ -22,8 +22,8 @@ from google.oauth2 import service_account
 # --- 1. การตั้งค่าหน้าเว็บและ Config ---
 st.set_page_config(page_title="USO1-Report Manager", layout="wide")
 
-# ⚠️ สำคัญ: ใส่ ID โฟลเดอร์ใหม่ที่คุณเป็นเจ้าของที่นี่
-GOOGLE_DRIVE_FOLDER_ID = '1-4OwgP-ODbelbtwSg5-m-rm4cyOTcW7O'
+# ⚠️ สำคัญ: ใส่ ID โฟลเดอร์ที่อยู่ใน Shared Drive ของคุณที่นี่
+GOOGLE_DRIVE_FOLDER_ID = 'ใส่_ID_โฟลเดอร์_ใน_Shared_Drive_ที่นี่'
 
 def get_drive_service():
     """เชื่อมต่อ Google Drive API"""
@@ -54,7 +54,7 @@ def init_fonts():
 
 F_REG, F_BOLD = init_fonts()
 
-# --- 2. Google Drive Helpers (ปรับปรุงระบบ Upload ใหม่) ---
+# --- 2. Google Drive Helpers (Shared Drive Support) ---
 
 def normalize_filename(name):
     """ล้างชื่อไฟล์เพื่อเปรียบเทียบ (ยุบขีดล่างซ้ำ)"""
@@ -69,11 +69,13 @@ def download_image_from_drive(file_name):
     try:
         search_target = normalize_filename(file_name)
         
-        # ดึงรายชื่อไฟล์ในโฟลเดอร์
+        # ดึงรายชื่อไฟล์ในโฟลเดอร์ (เพิ่มพารามิเตอร์สำหรับ Shared Drive)
         results = service.files().list(
             q=f"'{GOOGLE_DRIVE_FOLDER_ID}' in parents and trashed = false",
             fields="files(id, name)",
-            pageSize=1000
+            pageSize=1000,
+            supportsAllDrives=True,              # เพิ่มเพื่อให้หาใน Shared Drive เจอ
+            includeItemsFromAllDrives=True       # เพิ่มเพื่อให้หาใน Shared Drive เจอ
         ).execute()
         items = results.get('files', [])
         
@@ -83,7 +85,7 @@ def download_image_from_drive(file_name):
                 target_id = item['id']
                 break
         
-        if not target_id: # ลองหาแบบ Partial ถ้ายังไม่เจอ
+        if not target_id: 
             for item in items:
                 if search_target in normalize_filename(item['name']):
                     target_id = item['id']
@@ -103,7 +105,7 @@ def download_image_from_drive(file_name):
     return None
 
 def upload_image_to_drive(file_name, content_bytes):
-    """อัปโหลดไฟล์โดยส่งข้อมูลจาก RAM โดยตรง (ลดปัญหา Permission)"""
+    """อัปโหลดไฟล์ไปยัง Shared Drive โดยตรง"""
     service = get_drive_service()
     if not service: return
     
@@ -111,26 +113,34 @@ def upload_image_to_drive(file_name, content_bytes):
         clean_name = str(file_name).strip()
         norm_target = normalize_filename(clean_name)
         
-        # 1. ค้นหาเพื่อลบไฟล์เดิม (ถ้ามีชื่อซ้ำ)
+        # 1. ค้นหาเพื่อลบไฟล์เดิม (รองรับ Shared Drive)
         results = service.files().list(
             q=f"'{GOOGLE_DRIVE_FOLDER_ID}' in parents and trashed = false",
-            fields="files(id, name)"
+            fields="files(id, name)",
+            supportsAllDrives=True,
+            includeItemsFromAllDrives=True
         ).execute()
         
         for f in results.get('files', []):
             if normalize_filename(f['name']) == norm_target:
-                service.files().delete(fileId=f['id']).execute()
+                # ลบไฟล์ใน Shared Drive ต้องใส่ supportsAllDrives=True
+                service.files().delete(fileId=f['id'], supportsAllDrives=True).execute()
         
-        # 2. อัปโหลดไฟล์ใหม่โดยใช้ MediaIoBaseUpload
+        # 2. อัปโหลดไฟล์ใหม่ (รองรับ Shared Drive)
         file_metadata = {'name': clean_name, 'parents': [GOOGLE_DRIVE_FOLDER_ID]}
         media = MediaIoBaseUpload(BytesIO(content_bytes), mimetype='image/jpeg', resumable=True)
         
-        service.files().create(body=file_metadata, media_body=media).execute()
-        st.cache_data.clear() # ล้างแคชเพื่อให้แสดงรูปใหม่ทันที
+        # สร้างไฟล์ใน Shared Drive ต้องใส่ supportsAllDrives=True
+        service.files().create(
+            body=file_metadata, 
+            media_body=media,
+            supportsAllDrives=True
+        ).execute()
+        
+        st.cache_data.clear()
         
     except Exception as e:
         st.error(f"❌ อัปโหลดล้มเหลว: {str(e)}")
-        st.info("ตรวจสอบว่า Service Account ได้รับสิทธิ์เป็น 'Editor' ในโฟลเดอร์ใหม่แล้ว")
 
 # --- 3. Utility ---
 def apply_exif_orientation(img):
@@ -240,11 +250,16 @@ st.sidebar.title("เมนู")
 centers = st.session_state.main_df['file_name'].unique()
 sel_center = st.sidebar.selectbox("เลือกศูนย์", centers)
 
-# ส่วน Debug
-if st.sidebar.checkbox("🔍 ตรวจสอบไฟล์ใน Drive"):
+# ส่วน Debug สำหรับ Shared Drive
+if st.sidebar.checkbox("🔍 ตรวจสอบไฟล์ใน Shared Drive"):
     service = get_drive_service()
     if service:
-        res = service.files().list(q=f"'{GOOGLE_DRIVE_FOLDER_ID}' in parents and trashed = false", fields="files(name)").execute()
+        res = service.files().list(
+            q=f"'{GOOGLE_DRIVE_FOLDER_ID}' in parents and trashed = false", 
+            fields="files(name)",
+            supportsAllDrives=True,
+            includeItemsFromAllDrives=True
+        ).execute()
         files_in_drive = [f['name'] for f in res.get('files', [])]
         st.sidebar.write(f"ไฟล์ที่พบ ({len(files_in_drive)}):")
         st.sidebar.code("\n".join(files_in_drive))
@@ -277,7 +292,7 @@ for idx in df_idx:
 
             new_f = c_img[i].file_uploader(f"เปลี่ยนรูป {col}", type=['jpg','png','jpeg'], key=f"u_{col}_{idx}")
             if new_f:
-                with st.spinner("กำลังอัปโหลด..."):
+                with st.spinner("กำลังอัปโหลดไปยัง Shared Drive..."):
                     upload_image_to_drive(img_name, new_f.getbuffer())
                     st.toast("อัปโหลดสำเร็จ!")
                     time.sleep(1)
