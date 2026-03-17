@@ -53,15 +53,15 @@ def init_fonts():
 
 F_REG, F_BOLD = init_fonts()
 
-# --- 2. Google Drive Helpers (Smart Matching & Pagination) ---
+# --- 2. Google Drive Helpers (Exact Matching & Pagination) ---
 
 def normalize_filename(name):
-    """ล้างชื่อไฟล์เพื่อใช้เปรียบเทียบ"""
+    """ล้างชื่อไฟล์เพื่อใช้เปรียบเทียบ (ยุบขีดล่างซ้ำและตัดช่องว่าง)"""
     if not name or pd.isna(name) or str(name).strip() in ["0", "nan", "", "None"]: return ""
     base = os.path.splitext(str(name).strip().lower())[0]
-    return base.replace("__", "_").replace(" ", "").replace("-", "")
+    return base.replace("__", "_").replace(" ", "")
 
-@st.cache_data(ttl=600)
+@st.cache_data(ttl=300)
 def get_all_files_in_drive(folder_id):
     """กวาดรายชื่อไฟล์ทั้งหมดใน Shared Drive (รองรับหลักหมื่นไฟล์ด้วย Pagination)"""
     service = get_drive_service()
@@ -84,27 +84,18 @@ def get_all_files_in_drive(folder_id):
     except: pass
     return all_files
 
-def download_image_from_drive(file_name, center_prefix):
-    """ดึงรูปโดยตรวจสอบ Prefix เพื่อป้องกันการดึงผิดศูนย์"""
+def download_image_from_drive(file_name):
+    """ค้นหาและดึงรูปโดยใช้ Exact Match เท่านั้น (ป้องกันรูปซ้ำวัน)"""
     all_items = get_all_files_in_drive(GOOGLE_DRIVE_FOLDER_ID)
     search_target = normalize_filename(file_name)
     if not all_items or not search_target: return None
     
     target_id = None
-    # 1. ค้นหาแบบชื่อตรงกันเป๊ะ
+    # ✅ ค้นหาแบบชื่อตรงกันเป๊ะ (หลัง Normalize) เท่านั้น
     for item in all_items:
         if normalize_filename(item['name']) == search_target:
             target_id = item['id']
             break
-            
-    # 2. ถ้าไม่เจอ (Fuzzy Match) ต้องเช็ค Prefix ศูนย์ และ รหัสท้าย ให้ตรงกัน
-    if not target_id:
-        suffix = search_target.split("_")[-1] if "_" in search_target else search_target
-        for item in all_items:
-            norm_item = normalize_filename(item['name'])
-            if center_prefix.lower() in norm_item and suffix in norm_item:
-                target_id = item['id']
-                break
 
     if target_id:
         try:
@@ -121,10 +112,11 @@ def download_image_from_drive(file_name, center_prefix):
     return None
 
 def upload_image_to_drive(file_name, content_bytes):
-    """อัปโหลดรูปใหม่ (ลบไฟล์เดิมชื่อซ้ำถ้ามี)"""
+    """อัปโหลดรูปใหม่ (ลบไฟล์เดิมชื่อซ้ำเป๊ะๆ ถ้ามี)"""
     service = get_drive_service()
     if not service: return
     try:
+        # ค้นหาเพื่อลบไฟล์เดิม (ถ้ามีชื่อซ้ำเป๊ะๆ)
         query = f"'{GOOGLE_DRIVE_FOLDER_ID}' in parents and name = '{file_name}'"
         results = service.files().list(q=query, supportsAllDrives=True, includeItemsFromAllDrives=True).execute()
         for f in results.get('files', []):
@@ -138,7 +130,7 @@ def upload_image_to_drive(file_name, content_bytes):
     except Exception as e:
         st.error(f"❌ อัปโหลดล้มเหลว: {str(e)}")
 
-# --- 3. UI & Logic ---
+# --- 3. UI Logic ---
 
 if 'main_df' not in st.session_state:
     try:
@@ -153,7 +145,6 @@ def on_center_change():
 st.sidebar.title("เมนู")
 centers = st.session_state.main_df['file_name'].unique()
 sel_center = st.sidebar.selectbox("เลือกศูนย์", centers, on_change=on_center_change)
-center_prefix = str(sel_center).split(" ")[0] # เช่น "2.2-117"
 
 if st.sidebar.button("💾 บันทึก CSV", use_container_width=True):
     st.session_state.main_df.to_csv("03-2026.csv", index=False)
@@ -173,31 +164,27 @@ for idx in df_idx:
         c_img = st.columns(2)
         for i, col in enumerate(["img_in1", "img_out1"]):
             img_val = str(row[col])
-            img_d = download_image_from_drive(img_val, center_prefix)
+            # เรียกใช้ฟังก์ชันดึงรูป (Exact Match)
+            img_d = download_image_from_drive(img_val)
             
             if img_d:
-                c_img[i].image(img_d, caption=f"Drive: {img_val}", use_container_width=True)
+                c_img[i].image(img_d, caption=f"ชื่อไฟล์: {img_val}", use_container_width=True)
             else:
                 c_img[i].warning(f"❌ ไม่พบรูป: {img_val}")
             
             new_f = c_img[i].file_uploader(f"เลือกรูป {col}", type=['jpg','png','jpeg'], key=f"u_{col}_{idx}")
             if new_f:
-                # 💡 ใช้ปุ่มยืนยันเพื่อแก้บั๊ก Infinite Loop
-                if c_img[i].button(f"✅ ยืนยันอัปโหลด {col}", key=f"btn_{col}_{idx}"):
-                    # สร้าง Unique Filename เพื่อแก้บั๊กรูปซ้ำทุกวัน
-                    clean_date = str(row['date']).replace(" ", "").replace("/", "-")
-                    new_filename = f"{center_prefix}_{clean_date}_{col}.jpg"
-                    
+                if c_img[i].button(f"✅ ยืนยันเปลี่ยนรูป {col}", key=f"btn_{col}_{idx}"):
+                    # อัปโหลดด้วยชื่อเดิมใน CSV ทันที
                     with st.spinner("กำลังอัปโหลด..."):
-                        upload_image_to_drive(new_filename, new_f.getbuffer())
-                        st.session_state.main_df.at[idx, col] = new_filename
-                        st.success(f"บันทึกเป็น: {new_filename}")
+                        upload_image_to_drive(img_val, new_f.getbuffer())
+                        st.success(f"สำเร็จ: {img_val}")
                         time.sleep(1)
                         st.rerun()
 
 st.divider()
 
-# --- 4. PDF Generator ---
+# --- 4. PDF Generator (Full) ---
 def generate_pdf(df, center_name):
     buffer = BytesIO()
     doc = SimpleDocTemplate(buffer, pagesize=A4, rightMargin=20, leftMargin=20, topMargin=25, bottomMargin=15)
@@ -229,7 +216,7 @@ def generate_pdf(df, center_name):
         story.append(Paragraph(f"วันที่ : {r['date']}", styles["Heading2"]))
         story.append(Paragraph(f"ชื่อ : {r['name']} | ตำแหน่ง : {r['status']}", styles["Normal"]))
         for col in ["img_in1", "img_out1"]:
-            img_b = download_image_from_drive(r[col], center_prefix)
+            img_b = download_image_from_drive(r[col])
             if img_b:
                 try:
                     with Image.open(img_b) as p_img:
@@ -245,7 +232,7 @@ def generate_pdf(df, center_name):
     doc.build(story)
     return buffer.getvalue()
 
-if st.button("🖨️ ออกรายงาน PDF", use_container_width=True, type="primary"):
+if st.button("🖨️ ออกรายงาน PDF (รวมรูปภาพ)", use_container_width=True, type="primary"):
     with st.spinner("กำลังสร้าง PDF..."):
         pdf = generate_pdf(st.session_state.main_df.loc[df_idx], sel_center)
-        st.download_button("📥 ดาวน์โหลด PDF", pdf, f"{sel_center}.pdf", "application/pdf", use_container_width=True)
+        st.download_button("📥 ดาวน์โหลดรายงาน PDF", pdf, f"{sel_center}.pdf", "application/pdf", use_container_width=True)
