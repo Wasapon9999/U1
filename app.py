@@ -51,7 +51,7 @@ def init_fonts():
 
 F_REG, F_BOLD = init_fonts()
 
-# --- 2. Google Drive Helpers (Pagination & Overwrite) ---
+# --- 2. Google Drive Helpers ---
 
 def normalize_filename(name):
     if not name or pd.isna(name) or str(name).strip() in ["0", "nan", "", "None"]: return ""
@@ -123,7 +123,7 @@ def upload_and_overwrite(target_filename, content_bytes):
     except Exception as e:
         st.error(f"❌ อัปโหลดล้มเหลว: {str(e)}")
 
-# --- 3. Utility & Date Format (ของคุณเดิม) ---
+# --- 3. Utility & Date Format ---
 
 def apply_exif_orientation(img):
     try:
@@ -166,7 +166,7 @@ def parse_thai_date_simple(s):
     except: pass
     return pd.NaT, str(s)
 
-# --- 4. PDF Generator (ของคุณเดิมเป๊ะๆ) ---
+# --- 4. PDF Generator (รูปแบบเดิม) ---
 
 def generate_pdf_original_style(df, center_name):
     buffer = BytesIO()
@@ -261,6 +261,10 @@ if 'main_df' not in st.session_state:
         st.error("❌ ไม่พบไฟล์ CSV")
         st.stop()
 
+# สร้างสถานะเพื่อเช็คการอัปโหลดสำเร็จ
+if 'upload_done' not in st.session_state:
+    st.session_state.upload_done = False
+
 st.sidebar.title("เมนู")
 centers = st.session_state.main_df['file_name'].unique()
 sel_center = st.sidebar.selectbox("เลือกศูนย์", centers, on_change=lambda: st.cache_data.clear())
@@ -290,9 +294,12 @@ for idx in df_idx:
             else:
                 c_img[i].warning(f"❌ ไม่พบรูป: {target_filename}")
             
-            # อัปโหลดทันทีและเปลี่ยนชื่อตาม CSV
-            new_f = c_img[i].file_uploader(f"เลือกรูป {col}", type=['jpg','png','jpeg'], key=f"u_{col}_{idx}")
+            # --- ปรับส่วนนี้เพื่อหยุด Loop ---
+            upload_key = f"u_{col}_{idx}"
+            new_f = c_img[i].file_uploader(f"เปลี่ยนรูป {col}", type=['jpg','png','jpeg'], key=upload_key)
+            
             if new_f is not None:
+                # ตรวจสอบว่ารูปนี้เพิ่งถูกอัปโหลดไปในรอบปัจจุบันหรือไม่
                 if target_filename in ["", "0", "nan"]:
                     st.error("⚠️ ชื่อไฟล์ใน CSV ว่างเปล่า")
                 else:
@@ -300,6 +307,7 @@ for idx in df_idx:
                         upload_and_overwrite(target_filename, new_f.getbuffer())
                         st.toast(f"อัปโหลดสำเร็จ!")
                         time.sleep(1)
+                        # ใช้กลไก Rerun และล้างแคชของ File Uploader ทันที
                         st.rerun()
 
 st.divider()
