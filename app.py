@@ -23,8 +23,8 @@ from google.oauth2 import service_account
 st.set_page_config(page_title="USO1-Report Online", layout="wide")
 
 # ID ของโฟลเดอร์ Google Drive ที่คุณให้มา
-GOOGLE_DRIVE_FOLDER_ID = '1YACVXpINnadQpX6DaOaBZsiMscGv9ERg'
-
+# GOOGLE_DRIVE_FOLDER_ID = '1YACVXpINnadQpX6DaOaBZsiMscGv9ERg'
+GOOGLE_DRIVE_FOLDER_ID = '1-4OwgP-ODbelbtwSg5-m-rm4cyOTcW7O'
 
 def get_drive_service():
     """เชื่อมต่อกับ Google Drive API โดยใช้ Secrets หรือไฟล์ Local"""
