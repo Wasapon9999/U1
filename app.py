@@ -16,16 +16,17 @@ from PIL import Image, ExifTags
 
 # Google Drive API
 from googleapiclient.discovery import build
-from googleapiclient.http import MediaIoBaseDownload, MediaFileUpload
+from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
 from google.oauth2 import service_account
 
 # --- 1. การตั้งค่าหน้าเว็บและ Config ---
 st.set_page_config(page_title="USO1-Report Manager", layout="wide")
 
-# Folder ID ของคุณ
-GOOGLE_DRIVE_FOLDER_ID = '0ANHEDviy1Mq0Uk9PVA'
+# Folder ID จากลิงก์ Shared Drive ที่คุณส่งมา
+GOOGLE_DRIVE_FOLDER_ID = '1yO8M-5QIVRhVoDoLu2yaYAJo4csy1GdI'
 
 def get_drive_service():
+    """เชื่อมต่อ Google Drive API"""
     try:
         if "gcp_service_account" in st.secrets:
             info = st.secrets["gcp_service_account"]
@@ -36,7 +37,8 @@ def get_drive_service():
             creds = service_account.Credentials.from_service_account_file(
                 'service_account.json', scopes=['https://www.googleapis.com/auth/drive']
             )
-        else: return None
+        else:
+            return None
         return build('drive', 'v3', credentials=creds)
     except Exception as e:
         st.error(f"⚠️ Drive Connection Error: {e}")
@@ -47,16 +49,16 @@ def init_fonts():
         pdfmetrics.registerFont(TTFont('THSarabun', 'THSarabunNew.ttf'))
         pdfmetrics.registerFont(TTFont('THSarabun-Bold', 'THSarabunNew Bold.ttf'))
         return 'THSarabun', 'THSarabun-Bold'
-    except: return 'Helvetica', 'Helvetica-Bold'
+    except:
+        return 'Helvetica', 'Helvetica-Bold'
 
 F_REG, F_BOLD = init_fonts()
 
-# --- 2. Google Drive Helpers (Smart Matching Mode) ---
+# --- 2. Google Drive Helpers (Full Shared Drive Support) ---
 
 def normalize_filename(name):
-    """ฟังก์ชันสำหรับล้างชื่อไฟล์ให้เปรียบเทียบกันได้ง่ายขึ้น"""
+    """ล้างชื่อไฟล์เพื่อเปรียบเทียบ (ยุบขีดล่างซ้ำ)"""
     if not name: return ""
-    # ตัดนามสกุล, ทำเป็นตัวเล็ก, ตัดช่องว่าง, และยุบ __ ให้เหลือ _ อันเดียว
     base = os.path.splitext(str(name).strip().lower())[0]
     return base.replace("__", "_").replace(" ", "")
 
@@ -65,27 +67,25 @@ def download_image_from_drive(file_name):
     service = get_drive_service()
     if not service or not file_name or pd.isna(file_name): return None
     try:
-        # 1. เตรียมชื่อที่จะค้นหาจาก CSV (ล้างให้สะอาด)
         search_target = normalize_filename(file_name)
         
-        # 2. ดึงรายชื่อไฟล์ทั้งหมดในโฟลเดอร์
+        # เพิ่มพารามิเตอร์เพื่อค้นหาใน Shared Drive
         results = service.files().list(
             q=f"'{GOOGLE_DRIVE_FOLDER_ID}' in parents and trashed = false",
             fields="files(id, name)",
-            pageSize=1000
+            pageSize=1000,
+            supportsAllDrives=True,
+            includeItemsFromAllDrives=True
         ).execute()
         items = results.get('files', [])
         
         target_id = None
-        # 3. วนลูปเช็คชื่อไฟล์แบบยืดหยุ่น (ยุบขีดล่างเหมือนกันก่อนเทียบ)
         for item in items:
-            drive_file_normalized = normalize_filename(item['name'])
-            if drive_file_normalized == search_target:
+            if normalize_filename(item['name']) == search_target:
                 target_id = item['id']
                 break
         
-        # 4. ถ้ายังหาไม่เจอ ลองหาแบบ "มีชื่อนี้เป็นส่วนหนึ่ง" (Partial Match)
-        if not target_id:
+        if not target_id: 
             for item in items:
                 if search_target in normalize_filename(item['name']):
                     target_id = item['id']
@@ -100,27 +100,45 @@ def download_image_from_drive(file_name):
                 _, done = downloader.next_chunk()
             fh.seek(0)
             return fh
-    except: pass
+    except:
+        pass
     return None
 
 def upload_image_to_drive(file_name, content_bytes):
+    """อัปโหลดไปยัง Shared Drive โดยตรง (เลี่ยงปัญหา Quota)"""
     service = get_drive_service()
     if not service: return
-    clean_name = str(file_name).strip()
-    norm_name = normalize_filename(clean_name)
     
-    # ลบไฟล์เดิมที่มีชื่อหลักเดียวกัน (ไม่สนขีดล่างซ้ำ)
-    results = service.files().list(q=f"'{GOOGLE_DRIVE_FOLDER_ID}' in parents and trashed = false").execute()
-    for f in results.get('files', []):
-        if normalize_filename(f['name']) == norm_name:
-            service.files().delete(fileId=f['id']).execute()
-    
-    file_metadata = {'name': clean_name, 'parents': [GOOGLE_DRIVE_FOLDER_ID]}
-    with open("temp.jpg", "wb") as f: f.write(content_bytes)
-    media = MediaFileUpload("temp.jpg", mimetype='image/jpeg')
-    service.files().create(body=file_metadata, media_body=media).execute()
-    if os.path.exists("temp.jpg"): os.remove("temp.jpg")
-    st.cache_data.clear()
+    try:
+        clean_name = str(file_name).strip()
+        norm_target = normalize_filename(clean_name)
+        
+        # ค้นหาเพื่อลบไฟล์เดิมใน Shared Drive
+        results = service.files().list(
+            q=f"'{GOOGLE_DRIVE_FOLDER_ID}' in parents and trashed = false",
+            fields="files(id, name)",
+            supportsAllDrives=True,
+            includeItemsFromAllDrives=True
+        ).execute()
+        
+        for f in results.get('files', []):
+            if normalize_filename(f['name']) == norm_target:
+                service.files().delete(fileId=f['id'], supportsAllDrives=True).execute()
+        
+        # อัปโหลดไฟล์ใหม่
+        file_metadata = {'name': clean_name, 'parents': [GOOGLE_DRIVE_FOLDER_ID]}
+        media = MediaIoBaseUpload(BytesIO(content_bytes), mimetype='image/jpeg', resumable=True)
+        
+        service.files().create(
+            body=file_metadata, 
+            media_body=media,
+            supportsAllDrives=True
+        ).execute()
+        
+        st.cache_data.clear()
+        
+    except Exception as e:
+        st.error(f"❌ อัปโหลดล้มเหลว: {str(e)}")
 
 # --- 3. Utility ---
 def apply_exif_orientation(img):
@@ -222,7 +240,7 @@ def generate_pdf_original_style(df, center_name):
     return buffer.getvalue()
 
 # --- 5. Main UI ---
-st.title("🚀 ระบบจัดการรายงาน USO1 (สำหรับตรวจแก้ไข)")
+
 if 'main_df' not in st.session_state:
     st.session_state.main_df = pd.read_csv("03-2026.csv")
 
@@ -230,14 +248,22 @@ st.sidebar.title("เมนู")
 centers = st.session_state.main_df['file_name'].unique()
 sel_center = st.sidebar.selectbox("เลือกศูนย์", centers)
 
-# ตรวจสอบไฟล์ใน Drive
-if st.sidebar.checkbox("🔍 ตรวจสอบไฟล์ใน Drive"):
+# ส่วน Debug สำหรับ Shared Drive
+if st.sidebar.checkbox("🔍 ตรวจสอบไฟล์ใน Drive (Shared Drive)"):
     service = get_drive_service()
     if service:
-        res = service.files().list(q=f"'{GOOGLE_DRIVE_FOLDER_ID}' in parents and trashed = false", fields="files(name)").execute()
+        res = service.files().list(
+            q=f"'{GOOGLE_DRIVE_FOLDER_ID}' in parents and trashed = false", 
+            fields="files(name)",
+            supportsAllDrives=True,
+            includeItemsFromAllDrives=True
+        ).execute()
         files_in_drive = [f['name'] for f in res.get('files', [])]
-        st.sidebar.write(f"ไฟล์ที่พบ ({len(files_in_drive)}):")
-        st.sidebar.code("\n".join(files_in_drive))
+        st.sidebar.write(f"ไฟล์ที่พบในโฟลเดอร์ ({len(files_in_drive)}):")
+        if files_in_drive:
+            st.sidebar.code("\n".join(files_in_drive))
+        else:
+            st.sidebar.warning("ไม่พบไฟล์ใดๆ หรือไม่มีสิทธิ์เข้าถึง")
 
 if st.sidebar.button("💾 บันทึก CSV", width='stretch'):
     st.session_state.main_df.to_csv("03-2026.csv", index=False)
@@ -267,7 +293,7 @@ for idx in df_idx:
 
             new_f = c_img[i].file_uploader(f"เปลี่ยนรูป {col}", type=['jpg','png','jpeg'], key=f"u_{col}_{idx}")
             if new_f:
-                with st.spinner("Uploading..."):
+                with st.spinner("กำลังอัปโหลดไปยัง Shared Drive..."):
                     upload_image_to_drive(img_name, new_f.getbuffer())
                     st.toast("อัปโหลดสำเร็จ!")
                     time.sleep(1)
@@ -275,6 +301,6 @@ for idx in df_idx:
 
 st.divider()
 if st.button("🖨️ ออกรายงาน PDF", width='stretch', type="primary"):
-    with st.spinner("Generating..."):
+    with st.spinner("กำลังสร้าง PDF..."):
         pdf = generate_pdf_original_style(st.session_state.main_df.loc[df_idx], sel_center)
         st.download_button("📥 ดาวน์โหลด PDF", pdf, f"{sel_center}.pdf", "application/pdf", width='stretch')
