@@ -22,11 +22,11 @@ from google.oauth2 import service_account
 # --- 1. การตั้งค่าหน้าเว็บและ Config ---
 st.set_page_config(page_title="USO1-Report Manager", layout="wide")
 
-# ใส่ Folder ID ของคุณที่นี่
+# Folder ID จาก URL ที่คุณให้มา
 GOOGLE_DRIVE_FOLDER_ID = '1YACVXpINnadQpX6DaOaBZsiMscGv9ERg'
 
 def get_drive_service():
-    """เชื่อมต่อ Google Drive API"""
+    """เชื่อมต่อ Google Drive API ผ่าน Secrets หรือไฟล์ Local"""
     try:
         if "gcp_service_account" in st.secrets:
             info = st.secrets["gcp_service_account"]
@@ -38,6 +38,7 @@ def get_drive_service():
                 'service_account.json', scopes=['https://www.googleapis.com/auth/drive']
             )
         else:
+            st.error("❌ ไม่พบการตั้งค่า Google Service Account (Secrets หรือ JSON)")
             return None
         return build('drive', 'v3', credentials=creds)
     except Exception as e:
@@ -54,66 +55,78 @@ def init_fonts():
 
 F_REG, F_BOLD = init_fonts()
 
-# --- 2. Google Drive Helpers (ปรับปรุง: ค้นหาไม่สนนามสกุล) ---
+# --- 2. Google Drive Helpers (ค้นหาแบบละเอียด ไม่สนนามสกุล) ---
 
-@st.cache_data(ttl=300) # Cache 5 นาที
+@st.cache_data(ttl=300)
 def download_image_from_drive(file_name):
     service = get_drive_service()
-    if not service or not file_name or pd.isna(file_name): return None
+    if not service or not file_name or pd.isna(file_name): 
+        return None
+    
     try:
-        # ตัดนามสกุลออกเพื่อหาแค่ชื่อหลัก (เช่น '2.2-20_010326_01.jpg' -> '2.2-20_010326_01')
-        clean_name = str(file_name).strip()
-        base_search_name = os.path.splitext(clean_name)[0]
+        # 1. เตรียมชื่อที่จะค้นหา (ตัดนามสกุลและช่องว่างออก)
+        search_target = os.path.splitext(str(file_name).strip())[0].lower()
         
-        # ค้นหาไฟล์ที่มีชื่อประกอบด้วย base_search_name
-        query = f"name contains '{base_search_name}' and '{GOOGLE_DRIVE_FOLDER_ID}' in parents and trashed = false"
-        results = service.files().list(q=query, fields="files(id, name)").execute()
+        # 2. ดึงรายชื่อไฟล์ทั้งหมดในโฟลเดอร์ (ดึงมาสูงสุด 1000 ไฟล์)
+        results = service.files().list(
+            q=f"'{GOOGLE_DRIVE_FOLDER_ID}' in parents and trashed = false",
+            fields="files(id, name)",
+            pageSize=1000
+        ).execute()
         items = results.get('files', [])
         
-        if not items: return None
-        
-        # เลือกไฟล์ที่ชื่อ (หลังตัดนามสกุล) ตรงกันเป๊ะๆ
+        # 3. วนลูปเช็คชื่อไฟล์ใน Drive ทีละไฟล์ (Case-insensitive)
         target_id = None
         for item in items:
-            if os.path.splitext(item['name'])[0] == base_search_name:
+            drive_file_base = os.path.splitext(item['name'])[0].lower()
+            if drive_file_base == search_target:
                 target_id = item['id']
                 break
         
-        if not target_id: return None
+        # 4. ถ้าหาไม่เจอแบบเป๊ะๆ ลองหาแบบ "มีคำนั้นอยู่ในชื่อ" (Partial Match)
+        if not target_id:
+            for item in items:
+                if search_target in item['name'].lower():
+                    target_id = item['id']
+                    break
 
-        # ดาวน์โหลดไฟล์
-        request = service.files().get_media(fileId=target_id)
-        fh = BytesIO()
-        downloader = MediaIoBaseDownload(fh, request)
-        done = False
-        while not done:
-            _, done = downloader.next_chunk()
-        fh.seek(0)
-        return fh
-    except:
-        return None
+        if target_id:
+            request = service.files().get_media(fileId=target_id)
+            fh = BytesIO()
+            downloader = MediaIoBaseDownload(fh, request)
+            done = False
+            while not done:
+                _, done = downloader.next_chunk()
+            fh.seek(0)
+            return fh
+            
+    except Exception as e:
+        print(f"Error downloading {file_name}: {e}")
+    return None
 
 def upload_image_to_drive(file_name, content_bytes):
     service = get_drive_service()
     if not service: return
     
     clean_name = str(file_name).strip()
-    base_name = os.path.splitext(clean_name)[0]
+    base_name = os.path.splitext(clean_name)[0].lower()
     
-    # ลบไฟล์เดิมที่มีชื่อหลักเดียวกัน (ไม่สนนามสกุลเดิม)
-    query = f"name contains '{base_name}' and '{GOOGLE_DRIVE_FOLDER_ID}' in parents"
-    results = service.files().list(q=query, fields="files(id, name)").execute()
+    # ลบไฟล์เดิมที่มีชื่อหลักเดียวกันออกก่อน
+    results = service.files().list(
+        q=f"'{GOOGLE_DRIVE_FOLDER_ID}' in parents and trashed = false",
+        fields="files(id, name)"
+    ).execute()
     for f in results.get('files', []):
-        if os.path.splitext(f['name'])[0] == base_name:
+        if os.path.splitext(f['name'])[0].lower() == base_name:
             service.files().delete(fileId=f['id']).execute()
     
-    # อัปโหลดไฟล์ใหม่ (ใช้ชื่อเดิมที่ส่งมา)
+    # อัปโหลดไฟล์ใหม่
     file_metadata = {'name': clean_name, 'parents': [GOOGLE_DRIVE_FOLDER_ID]}
-    with open("temp.jpg", "wb") as f:
+    with open("temp_img.jpg", "wb") as f:
         f.write(content_bytes)
-    media = MediaFileUpload("temp.jpg", mimetype='image/jpeg')
+    media = MediaFileUpload("temp_img.jpg", mimetype='image/jpeg')
     service.files().create(body=file_metadata, media_body=media).execute()
-    if os.path.exists("temp.jpg"): os.remove("temp.jpg")
+    if os.path.exists("temp_img.jpg"): os.remove("temp_img.jpg")
     st.cache_data.clear()
 
 # --- 3. Utility Functions ---
@@ -127,7 +140,6 @@ def apply_exif_orientation(img):
                     if value == 3: img = img.transpose(Image.ROTATE_180)
                     elif value == 6: img = img.transpose(Image.ROTATE_270)
                     elif value == 8: img = img.transpose(Image.ROTATE_90)
-                    break
     except: pass
     return img
 
@@ -186,7 +198,7 @@ def generate_pdf_original_style(df, center_name):
     story.append(Paragraph(f"เจ้าหน้าที่ดูแลประจำศูนย์ : {emp}", styles["Heading2"]))
     story.append(Spacer(1, 10))
 
-    # Table
+    # ตารางสรุป
     t_data = [[Paragraph(h, styles["H_Table"]) for h in ["ลำดับ", "วันที่", "ชื่อ - นามสกุล", "เวลาเข้า", "เวลาออก", "ตำแหน่ง", "หมายเหตุ"]]]
     for i, row in df.iterrows():
         _, d_t = parse_thai_date_simple(row['date'])
@@ -201,12 +213,12 @@ def generate_pdf_original_style(df, center_name):
     story.append(tbl)
     story.append(Spacer(1, 30))
 
-    # Signatures
+    # ลายเซ็น
     sig_l = [Paragraph("....................................", styles["Signature"]), Spacer(1, 6), Paragraph(f"( {emp} )", styles["Signature"]), Paragraph("ผดล.ประจำศูนย์", styles["Signature"])]
     sig_r = [Paragraph("....................................", styles["Signature"]), Spacer(1, 6), Paragraph("( ...................................... )", styles["Signature"]), Paragraph("ตำแหน่ง_______________________", styles["Signature"])]
     story.append(KeepTogether(Table([[sig_l, sig_r]], colWidths=[260, 260])))
 
-    # Daily Details with Images
+    # รายละเอียดรูปภาพ
     for _, r in df.iterrows():
         story.append(PageBreak())
         _, d_t = parse_thai_date_simple(r['date'])
@@ -228,7 +240,11 @@ def generate_pdf_original_style(df, center_name):
                         i_tbl = Table([[im]], colWidths=[450])
                         i_tbl.setStyle(TableStyle([('ALIGN',(0,0),(-1,-1),'CENTER')]))
                         story.append(i_tbl)
-                except: pass
+                except: 
+                    story.append(Paragraph("[ไฟล์รูปภาพไม่สมบูรณ์]", styles["Normal"]))
+            else:
+                story.append(Paragraph(f"[ไม่พบรูปภาพ: {r[col_img]}]", styles["Normal"]))
+                
             story.append(Paragraph(f"เวลา{label} : <b>{fmt_time(r[col_time])}</b>", styles["Normal"]))
             story.append(Spacer(1, 18))
 
@@ -238,7 +254,11 @@ def generate_pdf_original_style(df, center_name):
 # --- 5. Main UI ---
 
 if 'main_df' not in st.session_state:
-    st.session_state.main_df = pd.read_csv("03-2026.csv")
+    try:
+        st.session_state.main_df = pd.read_csv("03-2026.csv")
+    except:
+        st.error("❌ ไม่พบไฟล์ 03-2026.csv")
+        st.stop()
 
 if 'last_uploaded_id' not in st.session_state:
     st.session_state.last_uploaded_id = ""
@@ -246,9 +266,9 @@ if 'last_uploaded_id' not in st.session_state:
 centers = st.session_state.main_df['file_name'].unique()
 sel_center = st.sidebar.selectbox("เลือกศูนย์", centers)
 
-if st.sidebar.button("💾 บันทึก CSV", use_container_width=True):
+if st.sidebar.button("💾 บันทึกการแก้ไขลง CSV", use_container_width=True):
     st.session_state.main_df.to_csv("03-2026.csv", index=False)
-    st.sidebar.success("บันทึกสำเร็จ!")
+    st.sidebar.success("บันทึก CSV สำเร็จ!")
 
 df_idx = st.session_state.main_df[st.session_state.main_df['file_name'] == sel_center].index
 
@@ -268,16 +288,16 @@ for idx in df_idx:
             if img_d:
                 with Image.open(img_d) as im_disp:
                     im_disp = apply_exif_orientation(im_disp)
-                    c_img[i].image(im_disp, caption=f"Drive: {img_name}", use_container_width=True)
+                    c_img[i].image(im_disp, caption=f"พบใน Drive: {img_name}", use_container_width=True)
             else:
-                c_img[i].warning(f"ไม่พบไฟล์ {img_name}")
+                c_img[i].warning(f"❌ ไม่พบ {img_name}")
 
             u_key = f"u_{col}_{idx}"
-            new_f = c_img[i].file_uploader(f"เปลี่ยนรูป {col}", type=['jpg','png','jpeg'], key=u_key)
+            new_f = c_img[i].file_uploader(f"อัปโหลดใหม่เพื่อเปลี่ยนรูป {col}", type=['jpg','png','jpeg'], key=u_key)
             if new_f:
                 f_id = f"{u_key}_{new_f.name}_{new_f.size}"
                 if st.session_state.last_uploaded_id != f_id:
-                    with st.spinner("Uploading..."):
+                    with st.spinner("กำลังอัปโหลดไปยัง Google Drive..."):
                         upload_image_to_drive(img_name, new_f.getbuffer())
                         st.session_state.last_uploaded_id = f_id
                         st.toast("อัปโหลดสำเร็จ!")
@@ -285,7 +305,7 @@ for idx in df_idx:
                         st.rerun()
 
 st.divider()
-if st.button("🖨️ ออกรายงาน PDF", use_container_width=True, type="primary"):
-    with st.spinner("Generating PDF..."):
+if st.button("🖨️ ออกรายงาน PDF (ดึงรูปจาก Drive)", use_container_width=True, type="primary"):
+    with st.spinner("กำลังสร้างไฟล์ PDF..."):
         pdf = generate_pdf_original_style(st.session_state.main_df.loc[df_idx], sel_center)
         st.download_button("📥 ดาวน์โหลด PDF", pdf, f"{sel_center}.pdf", "application/pdf", use_container_width=True)
