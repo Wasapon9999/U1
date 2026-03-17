@@ -51,16 +51,24 @@ def init_fonts():
 
 F_REG, F_BOLD = init_fonts()
 
-# --- 2. Google Drive Helpers (Debug Mode) ---
+# --- 2. Google Drive Helpers (Smart Matching Mode) ---
+
+def normalize_filename(name):
+    """ฟังก์ชันสำหรับล้างชื่อไฟล์ให้เปรียบเทียบกันได้ง่ายขึ้น"""
+    if not name: return ""
+    # ตัดนามสกุล, ทำเป็นตัวเล็ก, ตัดช่องว่าง, และยุบ __ ให้เหลือ _ อันเดียว
+    base = os.path.splitext(str(name).strip().lower())[0]
+    return base.replace("__", "_").replace(" ", "")
 
 @st.cache_data(ttl=300)
 def download_image_from_drive(file_name):
     service = get_drive_service()
     if not service or not file_name or pd.isna(file_name): return None
     try:
-        # ตัดนามสกุลออกและทำเป็นตัวเล็กเพื่อเปรียบเทียบ
-        search_target = os.path.splitext(str(file_name).strip())[0].lower()
+        # 1. เตรียมชื่อที่จะค้นหาจาก CSV (ล้างให้สะอาด)
+        search_target = normalize_filename(file_name)
         
+        # 2. ดึงรายชื่อไฟล์ทั้งหมดในโฟลเดอร์
         results = service.files().list(
             q=f"'{GOOGLE_DRIVE_FOLDER_ID}' in parents and trashed = false",
             fields="files(id, name)",
@@ -69,15 +77,17 @@ def download_image_from_drive(file_name):
         items = results.get('files', [])
         
         target_id = None
+        # 3. วนลูปเช็คชื่อไฟล์แบบยืดหยุ่น (ยุบขีดล่างเหมือนกันก่อนเทียบ)
         for item in items:
-            drive_file_base = os.path.splitext(item['name'])[0].lower()
-            if drive_file_base == search_target:
+            drive_file_normalized = normalize_filename(item['name'])
+            if drive_file_normalized == search_target:
                 target_id = item['id']
                 break
         
-        if not target_id: # ลองหาแบบ contains ถ้ายังไม่เจอ
+        # 4. ถ้ายังหาไม่เจอ ลองหาแบบ "มีชื่อนี้เป็นส่วนหนึ่ง" (Partial Match)
+        if not target_id:
             for item in items:
-                if search_target in item['name'].lower():
+                if search_target in normalize_filename(item['name']):
                     target_id = item['id']
                     break
 
@@ -97,11 +107,12 @@ def upload_image_to_drive(file_name, content_bytes):
     service = get_drive_service()
     if not service: return
     clean_name = str(file_name).strip()
-    base_name = os.path.splitext(clean_name)[0].lower()
+    norm_name = normalize_filename(clean_name)
     
+    # ลบไฟล์เดิมที่มีชื่อหลักเดียวกัน (ไม่สนขีดล่างซ้ำ)
     results = service.files().list(q=f"'{GOOGLE_DRIVE_FOLDER_ID}' in parents and trashed = false").execute()
     for f in results.get('files', []):
-        if os.path.splitext(f['name'])[0].lower() == base_name:
+        if normalize_filename(f['name']) == norm_name:
             service.files().delete(fileId=f['id']).execute()
     
     file_metadata = {'name': clean_name, 'parents': [GOOGLE_DRIVE_FOLDER_ID]}
@@ -121,6 +132,7 @@ def apply_exif_orientation(img):
                     if value == 3: img = img.transpose(Image.ROTATE_180)
                     elif value == 6: img = img.transpose(Image.ROTATE_270)
                     elif value == 8: img = img.transpose(Image.ROTATE_90)
+                    break
     except: pass
     return img
 
@@ -218,7 +230,7 @@ st.sidebar.title("เมนู")
 centers = st.session_state.main_df['file_name'].unique()
 sel_center = st.sidebar.selectbox("เลือกศูนย์", centers)
 
-# ส่วน DEBUG เพื่อดูไฟล์ใน Drive (จะลบทิ้งทีหลังได้)
+# ตรวจสอบไฟล์ใน Drive
 if st.sidebar.checkbox("🔍 ตรวจสอบไฟล์ใน Drive"):
     service = get_drive_service()
     if service:
