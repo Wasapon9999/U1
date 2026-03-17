@@ -22,9 +22,11 @@ from google.oauth2 import service_account
 # --- 1. การตั้งค่าหน้าเว็บและ Config ---
 st.set_page_config(page_title="USO1-Report Manager", layout="wide")
 
+# ✅ ใส่ ID โฟลเดอร์ใน Shared Drive ของคุณที่นี่
 GOOGLE_DRIVE_FOLDER_ID = '1yO8M-5QIVRhVoDoLu2yaYAJo4csy1GdI'
 
 def get_drive_service():
+    """เชื่อมต่อ Google Drive API"""
     try:
         if "gcp_service_account" in st.secrets:
             info = st.secrets["gcp_service_account"]
@@ -42,6 +44,7 @@ def get_drive_service():
         return None
 
 def init_fonts():
+    """ลงทะเบียนฟอนต์ภาษาไทย"""
     try:
         pdfmetrics.registerFont(TTFont('THSarabun', 'THSarabunNew.ttf'))
         pdfmetrics.registerFont(TTFont('THSarabun-Bold', 'THSarabunNew Bold.ttf'))
@@ -50,18 +53,17 @@ def init_fonts():
 
 F_REG, F_BOLD = init_fonts()
 
-# --- 2. Google Drive Helpers (Fixed Cross-Center Bug) ---
+# --- 2. Google Drive Helpers (Smart Matching & Shared Drive) ---
 
 def normalize_filename(name):
-    """ล้างชื่อไฟล์ให้เหลือแค่ตัวเลขและตัวอักษรเพื่อเทียบ (ไม่ตัดขีดล่าง)"""
-    if not name or pd.isna(name) or str(name).strip() in ["0", "nan", ""]: return ""
+    """ล้างชื่อไฟล์เพื่อใช้เปรียบเทียบ"""
+    if not name or pd.isna(name) or str(name).strip() in ["0", "nan", "", "None"]: return ""
     base = os.path.splitext(str(name).strip().lower())[0]
-    # ยุบขีดล่างซ้ำ และลบช่องว่าง
-    return base.replace("__", "_").replace(" ", "")
+    return base.replace("__", "_").replace(" ", "").replace("-", "")
 
-@st.cache_data(ttl=300) # ลดเหลือ 5 นาทีเพื่อความสดใหม่ของข้อมูล
+@st.cache_data(ttl=300)
 def get_all_files_in_drive(folder_id):
-    """กวาดรายชื่อไฟล์ทั้งหมด โดยแยก Cache ตาม Folder ID"""
+    """กวาดรายชื่อไฟล์ทั้งหมดใน Shared Drive (Pagination)"""
     service = get_drive_service()
     if not service: return []
     all_files = []
@@ -83,29 +85,23 @@ def get_all_files_in_drive(folder_id):
     return all_files
 
 def download_image_from_drive(file_name):
-    """ดึงรูปโดยตรวจสอบ Prefix เพื่อป้องกันการดึงผิดศูนย์"""
+    """ค้นหาและดาวน์โหลดรูป (Smart Search)"""
     all_items = get_all_files_in_drive(GOOGLE_DRIVE_FOLDER_ID)
     search_target = normalize_filename(file_name)
     if not all_items or not search_target: return None
     
     target_id = None
-    # 1. ค้นหาแบบชื่อตรงกันเป๊ะ (หลัง Normalize)
+    # 1. ค้นหาแบบชื่อตรงกันเป๊ะ
     for item in all_items:
         if normalize_filename(item['name']) == search_target:
             target_id = item['id']
             break
             
-    # 2. ถ้าไม่เจอ (Fuzzy Match) ต้องเช็ค Prefix (รหัสศูนย์) ด้วย
+    # 2. ถ้าไม่เจอ ลองหาแบบ Fuzzy (รหัสวันที่ส่วนท้ายตรงกัน)
     if not target_id:
-        # ดึง Prefix (เช่น 2.2-117)
-        prefix = search_target.split("_")[0] if "_" in search_target else None
-        # ดึง Suffix (เช่น 200326_01)
         suffix = search_target.split("_")[-1] if "_" in search_target else search_target
-        
         for item in all_items:
-            norm_item = normalize_filename(item['name'])
-            # เงื่อนไข: รหัสศูนย์ต้องตรงกัน และรหัสวันที่/ลำดับต้องตรงกัน
-            if prefix and prefix in norm_item and suffix in norm_item:
+            if suffix in normalize_filename(item['name']):
                 target_id = item['id']
                 break
 
@@ -124,48 +120,90 @@ def download_image_from_drive(file_name):
     return None
 
 def upload_image_to_drive(file_name, content_bytes):
+    """อัปโหลดรูปใหม่ (ลบไฟล์เดิมชื่อซ้ำถ้ามี)"""
     service = get_drive_service()
     if not service: return
     try:
-        clean_name = str(file_name).strip()
-        # ค้นหาเพื่อลบไฟล์เดิม (ถ้ามี)
-        query = f"'{GOOGLE_DRIVE_FOLDER_ID}' in parents and name = '{clean_name}'"
+        query = f"'{GOOGLE_DRIVE_FOLDER_ID}' in parents and name = '{file_name}'"
         results = service.files().list(q=query, supportsAllDrives=True, includeItemsFromAllDrives=True).execute()
         for f in results.get('files', []):
             try: service.files().delete(fileId=f['id'], supportsAllDrives=True).execute()
             except: pass
 
-        file_metadata = {'name': clean_name, 'parents': [GOOGLE_DRIVE_FOLDER_ID]}
+        file_metadata = {'name': file_name, 'parents': [GOOGLE_DRIVE_FOLDER_ID]}
         media = MediaIoBaseUpload(BytesIO(content_bytes), mimetype='image/jpeg', resumable=True)
         service.files().create(body=file_metadata, media_body=media, supportsAllDrives=True).execute()
         st.cache_data.clear() 
     except Exception as e:
         st.error(f"❌ อัปโหลดล้มเหลว: {str(e)}")
 
-# --- 3. UI Logic ---
+# --- 3. PDF Generator ---
+
+def generate_pdf_original_style(df, center_name):
+    buffer = BytesIO()
+    doc = SimpleDocTemplate(buffer, pagesize=A4, rightMargin=20, leftMargin=20, topMargin=25, bottomMargin=15)
+    styles = {
+        "Normal": ParagraphStyle("N", fontName=F_REG, fontSize=14, leading=18, alignment=1),
+        "Title": ParagraphStyle("T", fontName=F_BOLD, fontSize=18, leading=24, alignment=1),
+        "Heading2": ParagraphStyle("H2", fontName=F_BOLD, fontSize=14, leading=20, alignment=1),
+        "H_Table": ParagraphStyle("HT", fontName=F_BOLD, fontSize=10, leading=11, alignment=1),
+        "C_Table": ParagraphStyle("CT", fontName=F_REG, fontSize=10, leading=11, alignment=1),
+    }
+    story = []
+    story.append(Paragraph("รายงานเวลาปฏิบัติงาน USO1-Renew", styles["Title"]))
+    story.append(Paragraph(f"ศูนย์ : {center_name}", styles["Title"]))
+    
+    # ตารางสรุป
+    t_data = [[Paragraph(h, styles["H_Table"]) for h in ["ลำดับ", "วันที่", "ชื่อ - นามสกุล", "เวลาเข้า", "เวลาออก", "ตำแหน่ง", "หมายเหตุ"]]]
+    for i, row in df.iterrows():
+        t_data.append([
+            Paragraph(str(i+1), styles["C_Table"]), Paragraph(str(row['date']), styles["C_Table"]),
+            Paragraph(str(row['name']), styles["C_Table"]), Paragraph(str(row['time_in']), styles["C_Table"]),
+            Paragraph(str(row['time_out']), styles["C_Table"]), Paragraph(str(row['status']), styles["C_Table"]),
+            Paragraph("", styles["C_Table"])
+        ])
+    tbl = Table(t_data, colWidths=[35, 90, 130, 60, 60, 80, 75], repeatRows=1)
+    tbl.setStyle(TableStyle([('GRID',(0,0),(-1,-1),0.5,colors.black),('ALIGN',(0,0),(-1,-1),'CENTER')]))
+    story.append(tbl)
+
+    for _, r in df.iterrows():
+        story.append(PageBreak())
+        story.append(Paragraph(f"วันที่ : {r['date']}", styles["Heading2"]))
+        story.append(Paragraph(f"ชื่อ : {r['name']} | ตำแหน่ง : {r['status']}", styles["Normal"]))
+        
+        for label, col_img, col_time in [("เข้า (เช้า)", "img_in1", "time_in"), ("ออก (เย็น)", "img_out1", "time_out")]:
+            img_b = download_image_from_drive(r[col_img])
+            if img_b:
+                try:
+                    with Image.open(img_b) as p_img:
+                        p_img = p_img.convert('RGB')
+                        t_io = BytesIO()
+                        p_img.save(t_io, format="JPEG", quality=80)
+                        t_io.seek(0)
+                        im = RLImage(t_io)
+                        im._restrictSize(350, 280)
+                        story.append(im)
+                except: pass
+            story.append(Paragraph(f"เวลา{label} : {r[col_time]}", styles["Normal"]))
+            story.append(Spacer(1, 15))
+
+    doc.build(story)
+    return buffer.getvalue()
+
+# --- 4. Main UI ---
 
 if 'main_df' not in st.session_state:
-    st.session_state.main_df = pd.read_csv("03-2026.csv").fillna("")
-
-# เมื่อเปลี่ยนศูนย์ ให้ล้าง Cache ทันที
-def on_center_change():
-    st.cache_data.clear()
+    try:
+        st.session_state.main_df = pd.read_csv("03-2026.csv").fillna("")
+    except:
+        st.error("❌ ไม่พบไฟล์ 03-2026.csv")
+        st.stop()
 
 st.sidebar.title("เมนู")
 centers = st.session_state.main_df['file_name'].unique()
-sel_center = st.sidebar.selectbox("เลือกศูนย์", centers, on_change=on_center_change)
+sel_center = st.sidebar.selectbox("เลือกศูนย์", centers, on_change=lambda: st.cache_data.clear())
 
-# Sidebar Debug
-if st.sidebar.checkbox("🔍 ตรวจสอบไฟล์ใน Drive"):
-    files = get_all_files_in_drive(GOOGLE_DRIVE_FOLDER_ID)
-    st.sidebar.write(f"พบ {len(files)} ไฟล์")
-    # กรองแสดงเฉพาะไฟล์ที่ขึ้นต้นด้วยรหัสศูนย์ที่เลือก
-    prefix_sel = sel_center.split(" ")[0] # สมมติชื่อศูนย์คือ "2.2-117 โรงเรียน..."
-    filtered = [f['name'] for f in files if prefix_sel in f['name']]
-    st.sidebar.write(f"ไฟล์ของศูนย์นี้ ({len(filtered)}):")
-    st.sidebar.code("\n".join(filtered[:50]))
-
-if st.sidebar.button("💾 บันทึก CSV", use_container_width=True):
+if st.sidebar.button("💾 บันทึก CSV ลงเซิร์ฟเวอร์", use_container_width=True):
     st.session_state.main_df.to_csv("03-2026.csv", index=False)
     st.sidebar.success("บันทึกสำเร็จ!")
 
@@ -192,9 +230,23 @@ for idx in df_idx:
             
             new_f = c_img[i].file_uploader(f"เลือกรูป {col}", type=['jpg','png','jpeg'], key=f"u_{col}_{idx}")
             if new_f:
-                if c_img[i].button(f"ยืนยันอัปโหลด {col}", key=f"btn_{col}_{idx}"):
-                    upload_image_to_drive(img_val, new_f.getbuffer())
+                if c_img[i].button(f"✅ ยืนยันเปลี่ยนรูป {col}", key=f"btn_{col}_{idx}"):
+                    # 💡 แก้บั๊กรูปซ้ำ: สร้างชื่อไฟล์ใหม่ที่ไม่ซ้ำกันในแต่ละวัน
+                    center_code = str(sel_center).split(" ")[0]
+                    clean_date = str(row['date']).replace("/", "-").replace(" ", "")
+                    # ตั้งชื่อใหม่เป็น: รหัสศูนย์_วันที่_ประเภท.jpg
+                    new_filename = f"{center_code}_{clean_date}_{col}.jpg"
+                    
+                    upload_image_to_drive(new_filename, new_f.getbuffer())
+                    
+                    # อัปเดตชื่อใน DataFrame เพื่อให้แต่ละบรรทัดอ้างอิงชื่อไฟล์ต่างกัน
+                    st.session_state.main_df.at[idx, col] = new_filename
+                    st.success(f"บันทึกเป็น: {new_filename}")
+                    time.sleep(1)
                     st.rerun()
 
 st.divider()
-# --- (PDF Generator ส่วนเดิมของคุณ) ---
+if st.button("🖨️ ออกรายงาน PDF (รวมรูปภาพ)", use_container_width=True, type="primary"):
+    with st.spinner("กำลังสร้าง PDF..."):
+        pdf = generate_pdf_original_style(st.session_state.main_df.loc[df_idx], sel_center)
+        st.download_button("📥 ดาวน์โหลด PDF", pdf, f"{sel_center}.pdf", "application/pdf", use_container_width=True)
